@@ -25,6 +25,7 @@ from opentelemetry.trace import Span
 from bluesky._vendor.super_state_machine.errors import TransitionError
 from bluesky._vendor.super_state_machine.extras import PropertyMachine
 from bluesky._vendor.super_state_machine.machines import StateMachine
+from bluesky.utils.parallel_plans import ParallelPlanStatus
 
 from .bundlers import RunBundler, maybe_await
 from .log import ComposableLogAdapter, logger, msg_logger, state_logger
@@ -2019,11 +2020,13 @@ class RunEngine:
         Expected message object is:
 
             Msg('run_parallel', plan, group=...)
+
+        returns a ParallelPlanStatus representing the state of this branch
         """
         current_run = self._get_current_run_raise_if_closed(
-            msg,
-            "Can only run parallel ",
+            msg, "Can only run parallel plans within an open run"
         )
+        return ParallelPlanStatus()
 
     async def _declare_stream(self, msg):
         """Trigger the run engine to start bundling future obj.describe() calls for

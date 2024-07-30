@@ -65,5 +65,4 @@ class ParallelPlanStatus:
 def run_sub_plan(
     plan: Callable[[], Generator[Msg, Any, Any]], group: Any | None = None
 ):
-    yield Msg("run_parallel", plan)
-    return ParallelPlanStatus()
+    return (yield Msg("run_parallel", plan))
