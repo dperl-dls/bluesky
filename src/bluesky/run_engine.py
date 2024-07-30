@@ -436,10 +436,7 @@ class RunEngine:
         self._th = _ensure_event_loop_running(loop)
         self._state_lock = threading.RLock()
         self._loop = loop
-        if sys.version_info < (3, 8):  # noqa: UP036
-            self._loop_for_kwargs = {"loop": self._loop}
-        else:
-            self._loop_for_kwargs = {}
+        self._loop_for_kwargs = {}
         # When set, RunEngine.__call__ should stop blocking.
         self._blocking_event = threading.Event()
 
@@ -539,6 +536,7 @@ class RunEngine:
         self._task_fut = None  # future proxy to the task above
         self._pardon_failures = None  # will hold an asyncio.Event
         self._plan = None  # the plan instance from __call__
+        self._running_subplans: typing.Set[_RunningSubplan] = set()
         self._require_stream_declaration = False
         self._command_registry = {
             "declare_stream": self._declare_stream,
@@ -1955,15 +1953,9 @@ class RunEngine:
         """
         # TODO extract this from the Msg
         run_key = msg.run
-        if (
-            current_run := self._run_bundlers.get(
-                run_key, key_absence_sentinel := object
-            )
-        ) is key_absence_sentinel:
-            ims_msg = (
-                "A 'close_run' message was not received before the 'open_run' message"
-            )
-            raise IllegalMessageSequence(ims_msg)
+        current_run = self._get_current_run_raise_if_closed(
+            msg, "A 'close_run' message was not received before the 'open_run' message"
+        )
         ret = await current_run.close_run(msg)
         del self._run_bundlers[run_key]
         self._close_run_trace(msg)
@@ -1990,6 +1982,7 @@ class RunEngine:
             )
         ) is key_absence_sentinel:
             raise IllegalMessageSequence(error_message)
+        assert isinstance(current_run, RunBundler)
         return current_run
 
     async def _create(self, msg):
@@ -2026,7 +2019,9 @@ class RunEngine:
         current_run = self._get_current_run_raise_if_closed(
             msg, "Can only run parallel plans within an open run"
         )
-        return ParallelPlanStatus()
+        status = ParallelPlanStatus()
+        self._running_subplans.add(_RunningSubplan(msg.obj, status))
+        return status
 
     async def _declare_stream(self, msg):
         """Trigger the run engine to start bundling future obj.describe() calls for
@@ -2938,6 +2933,13 @@ class Dispatcher:
     @ignore_exceptions.setter
     def ignore_exceptions(self, val):
         self.cb_registry.ignore_exceptions = val
+
+
+class _RunningSubplan:
+    def __init__(self, plan, status):
+        self._plan: typing.Generator[Msg, typing.Any, typing.Any] = plan()
+        self._status: ParallelPlanStatus = status
+        self._waiting = False
 
 
 PAUSE_MSG = """
