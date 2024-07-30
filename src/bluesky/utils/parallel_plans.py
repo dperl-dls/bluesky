@@ -3,7 +3,24 @@ from typing import Any, Callable, Generator, Optional, Set
 from bluesky.protocols import Status
 from bluesky.utils import Msg
 
-ALLOWED_VERBS = {"set", "wait"}
+ALLOWED_VERBS = {
+    "read",
+    "locate",
+    "monitor",
+    "unmonitor",
+    "null",
+    "stop",
+    "set",
+    "trigger",
+    "sleep",
+    "wait",
+    "prepare",
+    "collect",
+    "kickoff",
+    "complete",
+    "stage",
+    "unstage",
+}
 
 
 class ParallelPlanStatus:
@@ -48,5 +65,5 @@ class ParallelPlanStatus:
 def run_sub_plan(
     plan: Callable[[], Generator[Msg, Any, Any]], group: Any | None = None
 ):
-    yield from plan()
+    yield Msg("run_parallel", plan)
     return ParallelPlanStatus()

@@ -570,6 +570,7 @@ class RunEngine:
             "unstage": self._unstage,
             "subscribe": self._subscribe,
             "unsubscribe": self._unsubscribe,
+            "run_parallel": self._run_parallel,
             "open_run": self._open_run,
             "close_run": self._close_run,
             "wait_for": self._wait_for,
@@ -1980,6 +1981,16 @@ class RunEngine:
         except IndexError:
             logger.warning("No open traces left to close!")
 
+    def _get_current_run_raise_if_closed(self, msg, error_message=""):
+        run_key = msg.run
+        if (
+            current_run := self._run_bundlers.get(
+                run_key, key_absence_sentinel := object()
+            )
+        ) is key_absence_sentinel:
+            raise IllegalMessageSequence(error_message)
+        return current_run
+
     async def _create(self, msg):
         """Trigger the run engine to start bundling future obj.read() calls for
          an Event document
@@ -1995,19 +2006,24 @@ class RunEngine:
         Also note that changing the 'name' of the Event will create a new
         Descriptor document.
         """
-        run_key = msg.run
-        if (
-            current_run := self._run_bundlers.get(
-                run_key, key_absence_sentinel := object()
-            )
-        ) is key_absence_sentinel:
-            ims_msg = (
-                "Cannot bundle readings without "
-                "an open run. That is, 'create' must "
-                "be preceded by 'open_run'."
-            )
-            raise IllegalMessageSequence(ims_msg)
+        current_run = self._get_current_run_raise_if_closed(
+            msg,
+            "Cannot bundle readings without an open run. That is, 'create' must be preceded by 'open_run'.",
+        )
         return await current_run.create(msg)
+
+    async def _run_parallel(self, msg):
+        """Trigger the run engine to start running the supplied plan in parallel to
+        the currently executing plan.
+
+        Expected message object is:
+
+            Msg('run_parallel', plan, group=...)
+        """
+        current_run = self._get_current_run_raise_if_closed(
+            msg,
+            "Can only run parallel ",
+        )
 
     async def _declare_stream(self, msg):
         """Trigger the run engine to start bundling future obj.describe() calls for
