@@ -3,6 +3,8 @@ from typing import Any, Callable, Generator, Optional, Set
 from bluesky.protocols import Status
 from bluesky.utils import Msg
 
+ALLOWED_VERBS = {"set", "wait"}
+
 
 class ParallelPlanStatus:
     def __init__(self, done=False) -> None:
