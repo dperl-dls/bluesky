@@ -125,7 +125,7 @@ class FailedPause(Exception):
 
 
 class FailedStatus(Exception):
-    """Exception to be raised if a SatusBase object reports done but failed"""
+    """Exception to be raised if a StatusBase object reports done but failed"""
 
 
 class InvalidCommand(KeyError):
