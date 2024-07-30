@@ -121,6 +121,7 @@ exclude = ["src/bluesky/_vendor/"]
 [tool.pytest.ini_options]
 # Run pytest with all our checkers, and don't spam us with massive tracebacks on error
 # Don't collect the interactive directory which is intended for manual execution
+asyncio_mode = "auto"
 addopts = """
     --tb=native -vv --doctest-modules --doctest-glob="*.rst" --ignore src/bluesky/tests/interactive
     """
