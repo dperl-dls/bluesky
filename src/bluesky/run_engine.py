@@ -25,7 +25,11 @@ from opentelemetry.trace import Span
 from bluesky._vendor.super_state_machine.errors import TransitionError
 from bluesky._vendor.super_state_machine.extras import PropertyMachine
 from bluesky._vendor.super_state_machine.machines import StateMachine
-from bluesky.utils.parallel_plans import ParallelPlanManager, ParallelPlanStatus
+from bluesky.utils.parallel_plans import (
+    ParallelPlanManager,
+    ParallelPlanStatus,
+    SubplanNotFinished,
+)
 
 from .bundlers import RunBundler, maybe_await
 from .log import ComposableLogAdapter, logger, msg_logger, state_logger
@@ -538,6 +542,9 @@ class RunEngine:
         self._pardon_failures = None  # will hold an asyncio.Event
         self._plan = None  # the plan instance from __call__
         self._subplan_mgr = ParallelPlanManager()  # holds some state about subplans
+        self._last_message_was_from_subplan = (
+            False  # flag to decide where to send responses
+        )
         self._require_stream_declaration = False
         self._command_registry = {
             "declare_stream": self._declare_stream,
@@ -1586,7 +1593,10 @@ class RunEngine:
                     # If we are here, we have come back to life either to
                     # continue (resume) or to clean up before exiting.
 
-                assert len(self._response_stack) == len(self._plan_stack)
+                assert len(self._response_stack) == len(self._plan_stack), (
+                    "Expected to have the same number of responses as plans:\n"
+                    f"{self._plan_stack=}\n{self._response_stack=}"
+                )
                 # set resp to the sentinel so that if we fail in the sleep
                 # we do not add an extra response
                 resp = sentinel
@@ -1779,7 +1789,7 @@ class RunEngine:
                     # if we poped a response and did not pop a plan, we need
                     # to put the new response back on the stack
                     if resp is not sentinel:
-                        self._response_stack.append(new_response)
+                        self._store_response(new_response)
 
         except StopIteration as e:
             self._exit_status = "success"
@@ -1886,15 +1896,26 @@ class RunEngine:
 
     def _get_next_message(self, resp):
         if not self._subplan_mgr.running:
+            self._last_message_was_from_subplan = False
             return self._plan_stack[-1].send(resp)
         else:
             # get the next message from the next-up running subplan in round-robin fashion
             # unless they are all waiting
-            return (
-                msg
-                if (msg := self._subplan_mgr.next(resp))
-                else self._plan_stack[-1].send(resp)
-            )
+            msg = self._subplan_mgr.next()
+            if msg:
+                self._last_message_was_from_subplan = True
+                # we popped this response but didn't use it in favor of going to the subplan
+                self._response_stack.append(resp)
+                return msg
+            else:
+                self._last_message_was_from_subplan = False
+                return self._plan_stack[-1].send(resp)
+
+    def _store_response(self, resp):
+        if self._last_message_was_from_subplan:
+            self._subplan_mgr.store_response(resp)
+        else:
+            self._response_stack.append(resp)
 
     async def _open_run(self, msg):
         """Instruct the RunEngine to start a new "run"
@@ -1964,6 +1985,11 @@ class RunEngine:
         if *exit_stats* and *reason* are not provided, use the values
         stashed on the RE.
         """
+        # TODO how to cleanly check for this?
+        # if self._subplan_mgr.running:
+        #     raise SubplanNotFinished(
+        #         f"Not all scheduled subplans have completed! Sill running: {self._subplan_mgr.print_plans()}"
+        #     )
         # TODO extract this from the Msg
         run_key = msg.run
         current_run = self._get_current_run_raise_if_closed(

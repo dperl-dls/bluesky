@@ -66,15 +66,21 @@ class ParallelPlanManager:
         self._running_plans: Deque[_RunningSubplan] = deque()
         self._i: int = 0
 
-    def next(self, resp):
+    def next(self):
         """Send resp into the subplan whose turn is next, and return the resulting
         message, or None if all subplans are waiting."""
         if self.running:
-            return p.send(resp) if (p := self._get_next_plan()) is not None else None
+            return p.send(p._resp) if (p := self._get_next_plan()) is not None else None
         # TODO is this an error?
 
     def add_subplan(self, plan: Generator[Msg, None, None], status: ParallelPlanStatus):
         self._running_plans.append(_RunningSubplan(plan, status))
+
+    def print_plans(self):
+        return str(list(self._running_plans))
+
+    def store_response(self, resp):
+        self._running_plans[self._i - 1]._resp = resp
 
     @property
     def running(self):
@@ -85,10 +91,10 @@ class ParallelPlanManager:
             # we have gone around all subplans
             self._i = 0
             return None
-        while (p := self._running_plans[self._i])._waiting:
+        while (p := self._running_plans[self._i]).waiting:
             self._i += 1
-            if self._i > len(self._running_plans):
-                # all sub_plans are waiting
+            if self._i >= len(self._running_plans):
+                # all remaining sub_plans are waiting
                 return None
         self._i += 1
         return p
@@ -99,17 +105,22 @@ class _RunningSubplan:
 
     def __init__(self, plan, status):
         self._plan = ensure_generator(plan())
-        self._plan.send(None)  # start the generator
         self._status: ParallelPlanStatus = status
         self._waiting = False
         self._waiting_status: Status | None = None
         self._group_id = uuid4()
+        self._resp: Any | None = None
 
     def send(self, resp):
         """Send into the subplan, and return the resulting message"""
         msg = self._plan.send(resp)
         msg = self._validate_msg(msg)
         return msg
+
+    @property
+    def waiting(self):
+        # this should check an actual status and reset _waiting if done
+        return self._waiting
 
     def _validate_msg(self, msg: Msg):
         """Make sure that messages are allowed and update"""
@@ -118,10 +129,17 @@ class _RunningSubplan:
                 f"Command {msg.command} cannot be executed in parallel "
                 "and is not allowed in sub-plans."
             )
+        if msg.command == "wait":
+            self._waiting = True
+            # TODO: actually wait for things - see waiting() above - get the status
+            return Msg("null", message="Replaces a wait from a subplan!")
         return msg
 
 
 class IllegalSubplanCommand(Exception): ...
+
+
+class SubplanNotFinished(Exception): ...
 
 
 @plan
@@ -132,4 +150,12 @@ def run_sub_plan(
     object representing the subplan.
 
     Any groups in the subplan are"""
+
     return (yield Msg("run_parallel", plan))
+
+
+@plan
+def wait_for_all_subplans():
+    """Block and wait for all currently running subplans to complete"""
+
+    return (yield Msg("wait_for_all_subplans", plan))

@@ -1,5 +1,7 @@
 import sys
 
+from bluesky.utils.parallel_plans import ParallelPlanStatus
+
 if sys.version_info >= (3, 10):
     from functools import partial
     from unittest.mock import ANY
@@ -38,11 +40,13 @@ class TestParallelPlans:
             st1 = yield from run_sub_plan(partial(_set_motor, motor1, 3), group="moves")
             st2 = yield from run_sub_plan(partial(_set_motor, motor2, 5), group="moves")
             st3 = yield from run_sub_plan(partial(_set_motor, motor3, 7), group="moves")
-            yield from bps.abs_set(motor4, 9)
+            yield from bps.abs_set(motor4, 9, group="main_plan_set")
             for st in (st1, st2, st3):
+                assert isinstance(st, ParallelPlanStatus)
                 assert not st.done
             get_mock_put(motor4).assert_called_with(9, wait=True, timeout=ANY)
             [set_mock_put_proceeds(m, True) for m in (motor1, motor2, motor3)]
+            yield from bps.wait("main_plan_set")
 
         RE(_parallel_plan())
 
