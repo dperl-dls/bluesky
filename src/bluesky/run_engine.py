@@ -1985,11 +1985,10 @@ class RunEngine:
         if *exit_stats* and *reason* are not provided, use the values
         stashed on the RE.
         """
-        # TODO how to cleanly check for this?
-        # if self._subplan_mgr.running:
-        #     raise SubplanNotFinished(
-        #         f"Not all scheduled subplans have completed! Sill running: {self._subplan_mgr.print_plans()}"
-        #     )
+        if self._subplan_mgr.running:
+            raise SubplanNotFinished(
+                f"Not all scheduled subplans have completed! Sill running: {self._subplan_mgr.print_plans()}"
+            )
         # TODO extract this from the Msg
         run_key = msg.run
         current_run = self._get_current_run_raise_if_closed(

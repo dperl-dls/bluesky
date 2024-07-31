@@ -1,6 +1,6 @@
 import sys
 
-from bluesky.utils.parallel_plans import ParallelPlanStatus
+from bluesky.utils.parallel_plans import ParallelPlanStatus, SubplanNotFinished
 
 if sys.version_info >= (3, 10):
     from functools import partial
@@ -46,6 +46,7 @@ class TestParallelPlans:
                 assert not st.done
             get_mock_put(motor4).assert_called_with(9, wait=True, timeout=ANY)
             [set_mock_put_proceeds(m, True) for m in (motor1, motor2, motor3)]
+            yield from bps.wait("moves")
             yield from bps.wait("main_plan_set")
 
         RE(_parallel_plan())
@@ -53,6 +54,24 @@ class TestParallelPlans:
         assert await motor1.get_value() == 3
         assert await motor2.get_value() == 5
         assert await motor3.get_value() == 7
+
+    async def test_subplans_must_complete(self, RE, motors: tuple[SignalRW, ...]):
+        motor1, motor2, _, motor4 = motors
+
+        @bpp.run_decorator()
+        def _parallel_plan():
+            [set_mock_put_proceeds(m, False) for m in (motor1, motor2)]
+            st1 = yield from run_sub_plan(partial(_set_motor, motor1, 3), group="moves")
+            st2 = yield from run_sub_plan(partial(_set_motor, motor2, 5), group="moves")
+            yield from bps.abs_set(motor4, 9, group="main_plan_set")
+            for st in (st1, st2):
+                assert isinstance(st, ParallelPlanStatus)
+                assert not st.done
+            yield from bps.wait("main_plan_set")  # this should complete instantly
+            # and the plan should end, but the waits for st1 and st2 will not finish
+
+        with pytest.raises(SubplanNotFinished):
+            RE(_parallel_plan())
 
     async def test_run_para_must_be_in_run(self, RE, motors: tuple[SignalRW, ...]):
         _, motor2, _, _ = motors
