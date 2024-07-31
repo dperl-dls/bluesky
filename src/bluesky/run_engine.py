@@ -25,7 +25,7 @@ from opentelemetry.trace import Span
 from bluesky._vendor.super_state_machine.errors import TransitionError
 from bluesky._vendor.super_state_machine.extras import PropertyMachine
 from bluesky._vendor.super_state_machine.machines import StateMachine
-from bluesky.utils.parallel_plans import ParallelPlanStatus
+from bluesky.utils.parallel_plans import ParallelPlanManager, ParallelPlanStatus
 
 from .bundlers import RunBundler, maybe_await
 from .log import ComposableLogAdapter, logger, msg_logger, state_logger
@@ -390,6 +390,7 @@ class RunEngine:
         "unmonitor",
         "open_run",
         "close_run",
+        "run_parallel",
         "install_suspender",
         "remove_suspender",
         "_start_suspender",
@@ -536,7 +537,7 @@ class RunEngine:
         self._task_fut = None  # future proxy to the task above
         self._pardon_failures = None  # will hold an asyncio.Event
         self._plan = None  # the plan instance from __call__
-        self._running_subplans: typing.Set[_RunningSubplan] = set()
+        self._subplan_mgr = ParallelPlanManager()  # holds some state about subplans
         self._require_stream_declaration = False
         self._command_registry = {
             "declare_stream": self._declare_stream,
@@ -1650,7 +1651,7 @@ class RunEngine:
                     # The normal case of clean operation
                     else:
                         try:
-                            msg = self._plan_stack[-1].send(resp)
+                            msg = self._get_next_message(resp)
                         # We have exhausted the top generator
                         except StopIteration:
                             # pop the dead generator go back to the top
@@ -1883,6 +1884,18 @@ class RunEngine:
             raise WaitForTimeoutError("Plan failed to complete in the specified time")
         return futs
 
+    def _get_next_message(self, resp):
+        if not self._subplan_mgr.running:
+            return self._plan_stack[-1].send(resp)
+        else:
+            # get the next message from the next-up running subplan in round-robin fashion
+            # unless they are all waiting
+            return (
+                msg
+                if (msg := self._subplan_mgr.next(resp))
+                else self._plan_stack[-1].send(resp)
+            )
+
     async def _open_run(self, msg):
         """Instruct the RunEngine to start a new "run"
 
@@ -2016,11 +2029,11 @@ class RunEngine:
 
         returns a ParallelPlanStatus representing the state of this branch
         """
-        current_run = self._get_current_run_raise_if_closed(
+        _ = self._get_current_run_raise_if_closed(
             msg, "Can only run parallel plans within an open run"
         )
         status = ParallelPlanStatus()
-        self._running_subplans.add(_RunningSubplan(msg.obj, status))
+        self._subplan_mgr.add_subplan(msg.obj, status)
         return status
 
     async def _declare_stream(self, msg):
@@ -2933,13 +2946,6 @@ class Dispatcher:
     @ignore_exceptions.setter
     def ignore_exceptions(self, val):
         self.cb_registry.ignore_exceptions = val
-
-
-class _RunningSubplan:
-    def __init__(self, plan, status):
-        self._plan: typing.Generator[Msg, typing.Any, typing.Any] = plan()
-        self._status: ParallelPlanStatus = status
-        self._waiting = False
 
 
 PAUSE_MSG = """

@@ -1,6 +1,5 @@
 import sys
 
-
 if sys.version_info >= (3, 10):
     from functools import partial
     from unittest.mock import ANY
@@ -9,9 +8,10 @@ if sys.version_info >= (3, 10):
     from ophyd_async.core.mock_signal_utils import get_mock_put, set_mock_put_proceeds
     from ophyd_async.core.signal import SignalRW
     from ophyd_async.epics.signal import epics_signal_rw
-    from bluesky.utils import IllegalMessageSequence
-    from bluesky import preprocessors as bpp
+
     import bluesky.plan_stubs as bps
+    from bluesky import preprocessors as bpp
+    from bluesky.utils import IllegalMessageSequence
     from bluesky.utils.parallel_plans import run_sub_plan
 
     @pytest.fixture
