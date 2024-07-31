@@ -541,10 +541,11 @@ class RunEngine:
         self._task_fut = None  # future proxy to the task above
         self._pardon_failures = None  # will hold an asyncio.Event
         self._plan = None  # the plan instance from __call__
-        self._subplan_mgr = ParallelPlanManager()  # holds some state about subplans
+        self._subplan_manager = ParallelPlanManager()  # holds some state about subplans
         self._last_message_was_from_subplan = (
             False  # flag to decide where to send responses
         )
+        self._waiting_on_subplans = False
         self._require_stream_declaration = False
         self._command_registry = {
             "declare_stream": self._declare_stream,
@@ -578,6 +579,7 @@ class RunEngine:
             "subscribe": self._subscribe,
             "unsubscribe": self._unsubscribe,
             "run_parallel": self._run_parallel,
+            "wait_parallel": self._wait_parallel,
             "open_run": self._open_run,
             "close_run": self._close_run,
             "wait_for": self._wait_for,
@@ -1895,13 +1897,18 @@ class RunEngine:
         return futs
 
     def _get_next_message(self, resp):
-        if not self._subplan_mgr.running:
+        if not self._subplan_manager.running:
             self._last_message_was_from_subplan = False
             return self._plan_stack[-1].send(resp)
         else:
+            if self._waiting_on_subplans:
+                # if we are waiting on subplan(s) skip normal message logic,
+                # and only yield from those subplan
+                # if it is waiting, do that wait in the RE and try again
+                ...
             # get the next message from the next-up running subplan in round-robin fashion
             # unless they are all waiting
-            msg = self._subplan_mgr.next()
+            msg = self._subplan_manager.next()
             if msg:
                 self._last_message_was_from_subplan = True
                 # we popped this response but didn't use it in favor of going to the subplan
@@ -1913,7 +1920,7 @@ class RunEngine:
 
     def _store_response(self, resp):
         if self._last_message_was_from_subplan:
-            self._subplan_mgr.store_response(resp)
+            self._subplan_manager.store_response(resp)
         else:
             self._response_stack.append(resp)
 
@@ -1975,6 +1982,11 @@ class RunEngine:
         self._run_start_uids.append(new_uid)
         return new_uid
 
+    def _exit_status_and_reason(self, msg: Msg):
+        msg_status = msg.exit_status if hasattr(msg, "exit_status") else msg.kwargs.get("exit_status")  # type: ignore
+        msg_reason = msg.reason if hasattr(msg, "reason") else msg.kwargs.get("reason")  # type: ignore
+        return msg_status or self._exit_status, msg_reason or self._reason
+
     async def _close_run(self, msg):
         """Instruct the RunEngine to write the RunStop document
 
@@ -1985,10 +1997,13 @@ class RunEngine:
         if *exit_stats* and *reason* are not provided, use the values
         stashed on the RE.
         """
-        if self._subplan_mgr.running:
-            raise SubplanNotFinished(
-                f"Not all scheduled subplans have completed! Sill running: {self._subplan_mgr.print_plans()}"
-            )
+        exit_status, _ = self._exit_status_and_reason(msg)
+        if self._subplan_manager.running:
+            self._subplan_manager.try_to_resolve_waits()
+            if self._subplan_manager.running and exit_status == "success":
+                raise SubplanNotFinished(
+                    f"Not all scheduled subplans have completed! Sill running: {self._subplan_manager.print_plans()}"
+                )
         # TODO extract this from the Msg
         run_key = msg.run
         current_run = self._get_current_run_raise_if_closed(
@@ -2000,10 +2015,7 @@ class RunEngine:
         return ret
 
     def _close_run_trace(self, msg):
-        exit_status = (
-            msg.exit_status if hasattr(msg, "exit_status") else self._exit_status
-        )
-        reason = msg.reason if hasattr(msg, "reason") else self._reason
+        exit_status, reason = self._exit_status_and_reason(msg)
         try:
             _span: Span = self._run_tracing_spans.pop()
             _span.set_attribute("exit_status", exit_status)
@@ -2058,8 +2070,21 @@ class RunEngine:
             msg, "Can only run parallel plans within an open run"
         )
         status = ParallelPlanStatus()
-        self._subplan_mgr.add_subplan(msg.obj, status)
+        self._subplan_manager.add_subplan(msg.obj, status)
+        group, _ = self._extract_group_and_move_on_from_message(msg)
+        self._add_status_to_group(msg.obj, status, group, action="run_parallel")
         return status
+
+    async def _wait_parallel(self, msg):
+        """A subplan has asked to wait on something - give the subplan manager
+        something to wait on"""
+        assert (
+            self._last_message_was_from_subplan
+        ), "Only a running subplan should yield this message"
+        group, _ = self._extract_group_and_move_on_from_message(msg)
+        futs = list(self._groups.pop(group, []))
+        status_objs = self._status_objs.pop(group)
+        self._subplan_manager.wait(futs, status_objs)
 
     async def _declare_stream(self, msg):
         """Trigger the run engine to start bundling future obj.describe() calls for
@@ -2471,6 +2496,15 @@ class RunEngine:
         if self.waiting_hook is not None:
             self.waiting_hook(*args, **kwargs)
 
+    def _extract_group_and_move_on_from_message(self, msg: Msg):
+        if msg.args:
+            (group,) = msg.args
+            move_on = False
+        else:
+            group = msg.kwargs["group"]
+            move_on = msg.kwargs.get("move_on", False)
+        return group, move_on
+
     @tracer.start_as_current_span(f"{_SPAN_NAME_PREFIX} wait")
     async def _wait(self, msg):
         """Block progress until every object that was triggered or set
@@ -2487,12 +2521,7 @@ class RunEngine:
         """
         _set_span_msg_attributes(trace.get_current_span(), msg)
         done = False  # boolean that tracks whether waiting is complete
-        if msg.args:
-            (group,) = msg.args
-            move_on = False
-        else:
-            group = msg.kwargs["group"]
-            move_on = msg.kwargs.get("move_on", False)
+        group, move_on = self._extract_group_and_move_on_from_message(msg)
         if group:
             trace.get_current_span().set_attribute("group", group)
         else:
@@ -2608,6 +2637,7 @@ class RunEngine:
 
             Msg('checkpoint')
         """
+        # TODO: disallow when subplans are running
         for current_run in self._run_bundlers.values():
             if current_run.bundling:
                 raise IllegalMessageSequence(

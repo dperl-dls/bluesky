@@ -46,7 +46,7 @@ class TestParallelPlans:
                 assert not st.done
             get_mock_put(motor4).assert_called_with(9, wait=True, timeout=ANY)
             [set_mock_put_proceeds(m, True) for m in (motor1, motor2, motor3)]
-            yield from bps.wait("moves")
+            yield from bps.wait("moves", timeout=10)
             yield from bps.wait("main_plan_set")
 
         RE(_parallel_plan())

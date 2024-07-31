@@ -1,5 +1,5 @@
 from collections import deque
-from typing import Any, Callable, Deque, Generator, Optional, Set
+from typing import Any, Callable, Deque, Generator, List, Optional, Set
 from uuid import uuid4
 
 from bluesky.protocols import Status
@@ -70,7 +70,16 @@ class ParallelPlanManager:
         """Send resp into the subplan whose turn is next, and return the resulting
         message, or None if all subplans are waiting."""
         if self.running:
-            return p.send(p._resp) if (p := self._get_next_plan()) is not None else None
+            try:
+                return (
+                    p.send(p.resp) if (p := self._get_next_plan()) is not None else None
+                )
+            except StopIteration:
+                assert isinstance(
+                    p, _RunningSubplan
+                ), "Shouldn't get stopiteration if p isn't a plan..."
+                self._running_plans.remove(p)
+                return None
         # TODO is this an error?
 
     def add_subplan(self, plan: Generator[Msg, None, None], status: ParallelPlanStatus):
@@ -80,11 +89,23 @@ class ParallelPlanManager:
         return str(list(self._running_plans))
 
     def store_response(self, resp):
-        self._running_plans[self._i - 1]._resp = resp
+        self._current_plan.resp = resp
+
+    def wait(self, futs, status_objs):
+        self._current_plan.wait_for(futs, status_objs)
+
+    def try_to_resolve_waits(self):
+        for p in self._running_plans:
+            if p.waiting:
+                ...
 
     @property
     def running(self):
         return len(self._running_plans) > 0
+
+    @property
+    def _current_plan(self):
+        return self._running_plans[self._i - 1]
 
     def _get_next_plan(self):
         if self._i >= len(self._running_plans):
@@ -104,23 +125,33 @@ class _RunningSubplan:
     """Holds a little info about a currently running subplan"""
 
     def __init__(self, plan, status):
-        self._plan = ensure_generator(plan())
-        self._status: ParallelPlanStatus = status
+        self.plan = ensure_generator(plan())
+        self.status: ParallelPlanStatus = status
         self._waiting = False
-        self._waiting_status: Status | None = None
-        self._group_id = uuid4()
-        self._resp: Any | None = None
+        self.waiting_objs: Set[Status] = set()
+        self.group_id = uuid4()
+        self.resp: Any | None = None
 
     def send(self, resp):
         """Send into the subplan, and return the resulting message"""
-        msg = self._plan.send(resp)
+        msg = self.plan.send(resp)
         msg = self._validate_msg(msg)
         return msg
+
+    def wait_for(self, futs, status_objs):
+        # self.waiting_objs.append(futs)
+        self.waiting_objs.update(status_objs)
 
     @property
     def waiting(self):
         # this should check an actual status and reset _waiting if done
-        return self._waiting
+        if not self.waiting_objs:
+            return self._waiting
+        else:
+            for status in self.waiting_objs:
+                if status.done:
+                    self._waiting = False
+                    self.waiting_objs = set()
 
     def _validate_msg(self, msg: Msg):
         """Make sure that messages are allowed and update"""
@@ -131,8 +162,14 @@ class _RunningSubplan:
             )
         if msg.command == "wait":
             self._waiting = True
-            # TODO: actually wait for things - see waiting() above - get the status
-            return Msg("null", message="Replaces a wait from a subplan!")
+            # this message makes the RunEngine insert the objects to wait for
+            # into self.waiting_objs
+            return Msg(
+                "wait_parallel",
+                msg.obj,
+                *msg.args,
+                **msg.kwargs,
+            )
         return msg
 
 
@@ -151,7 +188,7 @@ def run_sub_plan(
 
     Any groups in the subplan are"""
 
-    return (yield Msg("run_parallel", plan))
+    return (yield Msg("run_parallel", plan, group=group))
 
 
 @plan
